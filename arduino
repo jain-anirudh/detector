@@ -1,0 +1,448 @@
+#define type "Arduino_bare" 
+#define panServo_scanningMin 0               
+#define panServo_scanningMax 180             
+#define scanningSpeed 2000                   
+#define panServo_HomePosition 90           
+#define tiltServo_HomePosition 90         
+#define panServo_ReloadPosition  97         
+#define tiltServo_ReloadPosition 80         
+#define triggerServo_HomePosition 120        
+#define triggerServo_SqueezedPosition 90    
+#define triggerTravelMillis 1500            
+#define disablePlateDelay 5000              
+
+boolean useAmmoCounter = false;                
+int clipSize = 5;                       
+
+int panServoPin;                       
+int tiltServoPin;                   
+int triggerServoPin;                
+int firingIndicatorLEDPin;          
+int USBIndicatorLEDPin;               
+int modeIndicatorLEDPin;              
+int reloadSwitchPin;                
+int disablePlatePin;                  
+int electricTriggerPin;                
+boolean invertInputs;                 
+typedef struct config_t
+{
+  // Booleans but int
+  int controlMode;
+  int safety;
+  int firingMode;
+  int scanWhenIdle;
+  int trackingMotion;
+  int trackingColor;
+  int leadTarget;
+  int safeColor;
+  int showRestrictedZones;
+  int showDifferentPixels;
+  int showTargetBox;
+  int showCameraView;
+  int mirrorCam;
+  int soundEffects;
+
+  // Integers
+  int camWidth;
+  int camHeight;
+  int nbDot;
+  int antSens;
+  int minBlobArea;
+  int tolerance;
+  int effect;
+  int trackColorTolerance;
+  int trackColorRed;
+  int trackColorGreen;
+  int trackColorBlue;
+  int safeColorMinSize;
+  int safeColorTolerance;
+  int safeColorRed;
+  int safeColorGreen;
+  int safeColorBlue;
+  int idleTime;
+
+  // Floats
+  double propX;
+  double propY;
+  double xRatio;
+  double yRatio;
+  double xMin;
+  double xMax;
+  double yMin;
+  double yMax;
+
+} 
+configuration;
+configuration configuration1;
+
+#include <Servo.h>
+
+Servo pan;                            
+Servo tilt;                           
+Servo trigger;                        
+
+int xPosition;                        
+int yPosition;                        
+int fire = 0;                         
+int fireTimer = 0;
+int fireSelector = 1;                
+
+int idleCounter = 0;
+int watchdog = 0;
+int watchdogTimeout = 2000;
+boolean idle = true;
+boolean scanning = false;
+boolean scanDirection = true;
+boolean disabled = false;
+unsigned long int disableEndTime;
+int scanXPosition = panServo_scanningMin;
+
+int shotCounter = 0;                  
+boolean clipEmpty = false;            
+
+
+byte indicator;                      
+byte x100byte;                        
+byte x010byte;
+byte x001byte;
+byte y100byte;
+byte y010byte;
+byte y001byte;
+byte fireByte;
+byte fireSelectorByte;
+byte scanningByte;
+
+void setup(){
+  assignPins();
+
+  pan.attach(panServoPin);             
+  pan.write(panServo_HomePosition);
+  tilt.attach(tiltServoPin);           
+  tilt.write(tiltServo_HomePosition);
+  pinMode(electricTriggerPin, OUTPUT);    
+  digitalWrite(electricTriggerPin, LOW);
+  trigger.attach(triggerServoPin);      
+  trigger.write(triggerServo_HomePosition);
+
+  pinMode(USBIndicatorLEDPin, OUTPUT);        
+  pinMode(modeIndicatorLEDPin, OUTPUT);      
+  pinMode(firingIndicatorLEDPin, OUTPUT);     
+  pinMode(reloadSwitchPin, INPUT);            
+  pinMode(disablePlatePin, INPUT);            
+  if(invertInputs) {
+    digitalWrite(reloadSwitchPin, HIGH);            
+    digitalWrite(disablePlatePin, HIGH);            
+  }  
+  Serial.begin(4800);                     
+
+}
+
+void loop() {   
+  if (Serial.available() >= 10) {       
+    watchdog = 0;
+    indicator = Serial.read();         
+    if(indicator == 'a') {             
+      idle = false; 
+      idleCounter = 0;
+      digitalWrite(USBIndicatorLEDPin, HIGH);   
+      x100byte = Serial.read();         
+      x010byte = Serial.read();         
+      x001byte = Serial.read();         
+      y100byte = Serial.read();         
+      y010byte = Serial.read();         
+      y001byte = Serial.read();         
+      fireByte = Serial.read();         
+      fireSelectorByte = Serial.read(); 
+      fireSelector = int(fireSelectorByte) - 48;  
+      scanningByte = Serial.read();
+      if((int(scanningByte) - 48) == 1) {
+        scanning = true;
+      }
+      else{
+        scanning = false;
+      }
+    }
+    else if(indicator == 'z'){    
+      idle = true;
+    }
+    else if(indicator == 'b'){    
+
+      backup();
+
+    }
+    else if(indicator == 'r'){      
+
+      restore();
+
+    }
+  }
+  else{
+    watchdog++;
+    if(watchdog > watchdogTimeout) {
+      idle = true;
+    }
+  }
+  if(idle) {                          
+    Serial.write('T');               
+    idleCounter++;                              
+    if(idleCounter > 1000) {                  
+      sequenceLEDs(1, 100);
+      delay(10);
+
+      //      digitalWrite(USBIndicatorLEDPin, HIGH);
+      //      delay(250);                            
+      //      digitalWrite(USBIndicatorLEDPin, LOW);  
+      idleCounter = 0;                         
+    }                                          
+    else{                                      
+      digitalWrite(USBIndicatorLEDPin, LOW);   
+    }                                          
+    xPosition = panServo_HomePosition;   
+    yPosition = tiltServo_HomePosition;   
+    fire = 0;                              
+  }
+  else{                  
+    xPosition = (100*(int(x100byte)-48)) + (10*(int(x010byte)-48)) + (int(x001byte)-48);   
+    yPosition = (100*(int(y100byte)-48)) + (10*(int(y010byte)-48)) + (int(y001byte)-48);    
+    fire = int(fireByte) - 48;           
+  }
+
+  if(scanning) {
+    digitalWrite(modeIndicatorLEDPin, HIGH);
+    if(scanDirection) {
+      scanXPosition += 1;
+      if(scanXPosition > panServo_scanningMax) {
+        scanDirection = false;
+        scanXPosition = panServo_scanningMax;
+      }
+    }
+    else{
+      scanXPosition -= 1;
+      if(scanXPosition < panServo_scanningMin) {
+        scanDirection = true;
+        scanXPosition = panServo_scanningMin;
+      }
+    }
+    xPosition = scanXPosition;
+    yPosition = tiltServo_HomePosition;
+    fire = 0;
+    delay(scanningSpeed/abs(panServo_scanningMax-panServo_scanningMin));
+  }
+  else{
+    digitalWrite(modeIndicatorLEDPin, LOW);
+  }
+
+  if((digitalRead(disablePlatePin) == HIGH && !invertInputs) || (digitalRead(disablePlatePin) == LOW && invertInputs)) { 
+    disabled = true;
+    disableEndTime = millis() + disablePlateDelay;
+  } 
+  if(millis() > disableEndTime) {
+    disabled = false;
+  }
+
+  if((digitalRead(reloadSwitchPin) == HIGH && !invertInputs) || (digitalRead(reloadSwitchPin) == LOW && invertInputs)) {    
+    shotCounter = 0;
+    xPosition = panServo_ReloadPosition;    
+    yPosition = tiltServo_ReloadPosition;   
+    fire = 0;                        
+    digitalWrite(modeIndicatorLEDPin, HIGH);
+    delay(100);
+    digitalWrite(modeIndicatorLEDPin, LOW);
+    delay(100);
+  }  
+  
+  if(disabled) {
+    xPosition = panServo_ReloadPosition;     
+    yPosition = tiltServo_ReloadPosition;   
+    fire = 0;                        
+    digitalWrite(modeIndicatorLEDPin, HIGH);
+    delay(50);
+    digitalWrite(modeIndicatorLEDPin, LOW);
+    delay(50);
+  }
+
+  pan.write(xPosition);        
+  tilt.write(yPosition);       
+
+  if(useAmmoCounter && shotCounter >= clipSize) {
+    clipEmpty = true;
+  }
+  else{
+    clipEmpty = false;
+  }
+
+
+  if(fire == 1 && !clipEmpty) {           
+    Fire(fireSelector);       
+  } 
+  else{                     
+    ceaseFire(fireSelector);  
+  }
+}
+
+void Fire(int selector) {        
+  if(selector == 1) {
+    fireTimer++;
+    if(fireTimer >=0 && fireTimer <= triggerTravelMillis) {
+      digitalWrite(electricTriggerPin, HIGH);
+      trigger.write(triggerServo_SqueezedPosition);
+      digitalWrite(firingIndicatorLEDPin, HIGH);
+    }
+    if(fireTimer > triggerTravelMillis && fireTimer < 1.5*triggerTravelMillis) {
+      digitalWrite(electricTriggerPin, LOW);
+      trigger.write(triggerServo_HomePosition);
+      digitalWrite(firingIndicatorLEDPin, LOW);
+    }
+    if(fireTimer >= 1.5*triggerTravelMillis) {
+      fireTimer = 0;
+      if(useAmmoCounter) {
+        shotCounter++;      
+      }
+    }
+  }
+  if(selector == 3) {
+    digitalWrite(electricTriggerPin, HIGH);
+    trigger.write(triggerServo_SqueezedPosition);
+    digitalWrite(firingIndicatorLEDPin, HIGH);
+  }  
+}
+
+void ceaseFire(int selector) {     
+  if(selector == 1) {
+    fireTimer = 0;
+    digitalWrite(electricTriggerPin, LOW);
+    trigger.write(triggerServo_HomePosition);
+    digitalWrite(firingIndicatorLEDPin, LOW);
+  }
+  if(selector == 3) {             
+    digitalWrite(electricTriggerPin, LOW);
+    trigger.write(triggerServo_HomePosition);
+    digitalWrite(firingIndicatorLEDPin, LOW);
+  } 
+}
+
+void sequenceLEDs(int repeats, int delayTime) {
+  int startDelay;
+  for(int i = 0; i < repeats; i++) {
+
+    digitalWrite(USBIndicatorLEDPin, LOW);
+    digitalWrite(modeIndicatorLEDPin, LOW);
+
+    startDelay = millis();
+    while(millis()-startDelay < delayTime) {
+      digitalWrite(firingIndicatorLEDPin, HIGH);
+    }
+    digitalWrite(firingIndicatorLEDPin, LOW);
+
+    startDelay = millis();
+    while(millis()-startDelay < delayTime) {
+      digitalWrite(USBIndicatorLEDPin, HIGH);
+    }
+    digitalWrite(USBIndicatorLEDPin, LOW);
+
+    startDelay = millis();
+    while(millis()-startDelay < delayTime) {
+      digitalWrite(modeIndicatorLEDPin, HIGH);
+    }
+    digitalWrite(modeIndicatorLEDPin, LOW);
+
+    startDelay = millis();
+    while(millis()-startDelay < delayTime) {
+      // chill
+    }
+  }
+}
+
+void assignPins() {
+  if(type == "Arduino_bare" || type == "Arduino_Bare") {
+    // pin attachments:
+    panServoPin = 4;                       
+    tiltServoPin = 7;                      
+    triggerServoPin = 10;                    
+    firingIndicatorLEDPin = 12;              
+    USBIndicatorLEDPin = 11;                 
+    modeIndicatorLEDPin = 13;                
+    reloadSwitchPin = 3;                    
+    disablePlatePin = 2;                   
+    electricTriggerPin = 9;                 
+    invertInputs = true;                  
+  }
+  else if(type == "Shield_v4" || type == "Shield_v6") {
+    // pin attachments:
+    panServoPin = 4;                        
+    tiltServoPin = 7;                       
+    triggerServoPin = 10;                    
+    electricTriggerPin = 6;               
+    firingIndicatorLEDPin = 11;             
+    USBIndicatorLEDPin = 12;                 
+    modeIndicatorLEDPin = 13;               
+    reloadSwitchPin = 10;                   
+    disablePlatePin = 2;                   
+    invertInputs = true;                  
+  }
+  else if(type == "Shield_v7") {
+    // pin attachments:
+    panServoPin = 4;                        
+    tiltServoPin = 7;                       
+    triggerServoPin = 10;                   
+    electricTriggerPin = 9;                 
+    firingIndicatorLEDPin = 12;             
+    USBIndicatorLEDPin = 6;                 
+    modeIndicatorLEDPin = 13;               
+    reloadSwitchPin = 11;                   
+    disablePlatePin = 2;                   
+    invertInputs = true;                   
+  }
+  else if(type == "Standalone_v3") {
+    // pin attachments:
+    panServoPin = 4;                       
+    tiltServoPin = 7;                       
+    triggerServoPin = 10;                    
+    electricTriggerPin = 9;                 
+    firingIndicatorLEDPin = 12;              
+    USBIndicatorLEDPin = 14;                 
+    modeIndicatorLEDPin = 13;                
+    reloadSwitchPin = 11;                
+    disablePlatePin = 2;                
+    invertInputs = true;                  
+  }
+  else if(type == "Standalone_v5") {
+    // pin attachments:
+    panServoPin = 4;                       
+    tiltServoPin = 7;                       
+    triggerServoPin = 10;                   
+    electricTriggerPin = 9;                
+    firingIndicatorLEDPin = 12;            
+    USBIndicatorLEDPin = 14;                 
+    modeIndicatorLEDPin = 13;               
+    reloadSwitchPin = 11;                   
+    disablePlatePin = 2;                   
+    invertInputs = true;                  
+  }
+  else if(type == "Standalone_v7") {
+    // pin attachments:
+    panServoPin = 4;                        
+    tiltServoPin = 7;                      
+    triggerServoPin = 10;                  
+    electricTriggerPin = 9;                
+    firingIndicatorLEDPin = 12;             
+    USBIndicatorLEDPin = 14;                 
+    modeIndicatorLEDPin = 13;               
+    reloadSwitchPin = 11;                  
+    disablePlatePin = 2;                   
+    invertInputs = true;                  
+  }
+  else if(type == "Standalone_v8") {
+    // pin attachments:
+    panServoPin = 4;                        
+    tiltServoPin = 7;                       
+    triggerServoPin = 10;                   
+    electricTriggerPin = 9;               
+    firingIndicatorLEDPin = 12;            
+    USBIndicatorLEDPin = 14;                
+    modeIndicatorLEDPin = 13;               
+    reloadSwitchPin = 11;                  
+    disablePlatePin = 2;                   
+    invertInputs = true;                   
+  }
+}
